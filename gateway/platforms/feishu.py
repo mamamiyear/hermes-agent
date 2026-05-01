@@ -390,6 +390,7 @@ class FeishuAdapterSettings:
     group_rules: Dict[str, FeishuGroupRule] = field(default_factory=dict)
     allow_bots: str = "none"  # "none" | "mentions" | "all"
     require_mention: bool = True
+    auto_at_reply_author: bool = True
 
 
 @dataclass
@@ -545,6 +546,24 @@ def _coerce_required_int(value: Any, default: int, min_value: int = 0) -> int:
 
 def _build_markdown_post_payload(content: str) -> str:
     rows = _build_markdown_post_rows(content)
+    return json.dumps(
+        {
+            "zh_cn": {
+                "content": rows,
+            }
+        },
+        ensure_ascii=False,
+    )
+
+
+def _build_markdown_post_payload_with_mention(content: str, mention_user_id: str) -> str:
+    rows = _build_markdown_post_rows(content)
+    if not rows:
+        rows = [[{"tag": "md", "text": content or ""}]]
+    first_row = list(rows[0])
+    first_row.insert(0, {"tag": "at", "user_id": mention_user_id})
+    first_row.insert(1, {"tag": "text", "text": " "})
+    rows = [first_row, *rows[1:]]
     return json.dumps(
         {
             "zh_cn": {
@@ -1404,6 +1423,7 @@ class FeishuAdapter(BasePlatformAdapter):
         # Feishu reaction deletion requires the opaque reaction_id returned
         # by create, so we cache it per message_id.
         self._pending_processing_reactions: "OrderedDict[str, str]" = OrderedDict()
+        self._auto_at_reply_author = True
         self._load_seen_message_ids()
 
     @staticmethod
@@ -1504,6 +1524,7 @@ class FeishuAdapter(BasePlatformAdapter):
             require_mention=_to_boolean(
                 extra.get("require_mention", os.getenv("FEISHU_REQUIRE_MENTION", "true"))
             ),
+            auto_at_reply_author=_to_boolean(extra.get("auto_at_reply_author", True)),
         )
 
     def _apply_settings(self, settings: FeishuAdapterSettings) -> None:
@@ -1536,6 +1557,7 @@ class FeishuAdapter(BasePlatformAdapter):
         self._ws_ping_timeout = settings.ws_ping_timeout
         self._allow_bots = settings.allow_bots
         self._require_mention = settings.require_mention
+        self._auto_at_reply_author = settings.auto_at_reply_author
 
     def _build_event_handler(self) -> Any:
         if EventDispatcherHandler is None:
@@ -1705,10 +1727,27 @@ class FeishuAdapter(BasePlatformAdapter):
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
         last_response = None
-
+        mention_user = None
+        mention_user_id = ""
+        mention_user_name = ""
+        if (
+            reply_to
+            and self._auto_at_reply_author
+            and isinstance(metadata, dict)
+            and metadata.get("mention_user_id")
+        ):
+            mention_user_id = str(metadata.get("mention_user_id") or "").strip()
+            mention_user_name = str(metadata.get("mention_user_name") or "").strip()
+            mention_user = {
+                "user_id": mention_user_id,
+                "user_name": mention_user_name,
+            }
         try:
-            for chunk in chunks:
-                msg_type, payload = self._build_outbound_payload(chunk)
+            for idx, chunk in enumerate(chunks):
+                if idx == 0 and mention_user:
+                    msg_type,payload = self._build_outbound_payload_with_mention(chunk, mention_user)
+                else:
+                    msg_type, payload = self._build_outbound_payload(chunk)
                 try:
                     response = await self._feishu_send_with_retry(
                         chat_id=chat_id,
@@ -3987,6 +4026,13 @@ class FeishuAdapter(BasePlatformAdapter):
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
         if _MARKDOWN_HINT_RE.search(content):
             return "post", _build_markdown_post_payload(content)
+        text_payload = {"text": content}
+        return "text", json.dumps(text_payload, ensure_ascii=False)
+
+    def _build_outbound_payload_with_mention(self, content: str, mention_user: Dict[str, str]) -> tuple[str, str]:
+        if _MARKDOWN_HINT_RE.search(content) and not mention_user["user_name"]:
+            return "post", _build_markdown_post_payload_with_mention(content, mention_user)
+        content = f"<at user_id={mention_user['user_id']}>{mention_user['user_name']}</at>" + content
         text_payload = {"text": content}
         return "text", json.dumps(text_payload, ensure_ascii=False)
 

@@ -4660,3 +4660,43 @@ class TestFeishuMentionEndToEnd(unittest.TestCase):
         # Body: leading @Hermes stripped, Alice preserved, trailing text intact.
         self.assertIn("@Alice review the spec with Alice", event.text)
         self.assertNotIn("@Hermes @Alice", event.text)
+
+
+class TestFeishuOutboundAutoMention(unittest.TestCase):
+    def test_send_prefixes_at_mention_when_metadata_provided(self):
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter.__new__(FeishuAdapter)
+        adapter._client = object()
+        adapter._auto_at_reply_author = True
+        adapter.format_message = lambda x: x
+        adapter.truncate_message = lambda x, limit: [x]
+
+        response_obj = SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(message_id="m1"),
+            code=0,
+            msg="ok",
+        )
+
+        captured = {}
+
+        async def _fake_send_with_retry(**kwargs):
+            captured.update(kwargs)
+            return response_obj
+
+        adapter._feishu_send_with_retry = AsyncMock(side_effect=_fake_send_with_retry)
+
+        async def _run():
+            await adapter.send(
+                chat_id="oc_chat",
+                content="hello",
+                reply_to="m0",
+                metadata={"mention_user_id": "ou_alice"},
+            )
+
+        asyncio.run(_run())
+        self.assertEqual(captured.get("msg_type"), "post")
+        payload = captured.get("payload") or ""
+        self.assertIn('"tag": "at"', payload)
+        self.assertIn('"user_id": "ou_alice"', payload)

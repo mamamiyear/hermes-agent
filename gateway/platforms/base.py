@@ -2659,6 +2659,16 @@ class BasePlatformAdapter(ABC):
         
         # Start continuous typing indicator (refreshes every 2 seconds)
         _thread_metadata = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+        if (
+            self.platform == Platform.FEISHU
+            and bool((self.config.extra or {}).get("auto_at_reply_author"))
+            and getattr(event.source, "chat_type", "dm") != "dm"
+            and getattr(event.source, "user_id", None)
+        ):
+            _thread_metadata = dict(_thread_metadata or {})
+            _thread_metadata["mention_user_id"] = event.source.user_id
+            if getattr(event.source, "user_name", None):
+                _thread_metadata["mention_user_name"] = event.source.user_name
         _keep_typing_kwargs = {"metadata": _thread_metadata}
         try:
             _keep_typing_sig = inspect.signature(self._keep_typing)
